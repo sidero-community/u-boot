@@ -471,7 +471,7 @@ static int brcm_pcie_post_setup_bcm2712(struct brcm_pcie *pcie)
 
 	/*
 	 * Set L1SS sub-state timers to avoid lengthy state transitions,
-	 * PM clock period is 18.52ns (1/54MHz, round down).
+	 * PM clock period is 18.52ns (1/54MHz, round down to 18 = 0x12).
 	 */
 	tmp = readl(pcie->base + PCIE_RC_PL_PHY_CTL_15);
 	tmp &= ~PCIE_RC_PL_PHY_CTL_15_PM_CLK_PERIOD_MASK;
@@ -600,9 +600,9 @@ static int brcm_pcie_probe(struct udevice *dev)
 	 * chips (BCM2712), use 512 bytes.
 	 */
 	if (pcie->cfg->soc_base == BCM7712)
-		burst = 0x2; /* 512 bytes */
+		burst = BURST_SIZE_512;
 	else
-		burst = 0x0; /* 128 bytes */
+		burst = BURST_SIZE_128;
 
 	/* Set SCB_MAX_BURST_SIZE, CFG_READ_UR_MODE, SCB_ACCESS_EN */
 	tmp = readl(base + PCIE_MISC_MISC_CTRL);
@@ -613,14 +613,14 @@ static int brcm_pcie_probe(struct udevice *dev)
 	u32p_replace_bits(&tmp, 1, MISC_CTRL_PCIE_RCB_64B_MODE_MASK);
 	writel(tmp, base + PCIE_MISC_MISC_CTRL);
 
-	/* Set up inbound windows */
-	pci_get_dma_regions(dev, &region, 0);
-	brcm_pcie_set_inbound_wins(pcie, &region);
-
 	if (!brcm_pcie_rc_mode(pcie)) {
 		printf("PCIe misconfigured; is in EP mode\n");
 		return -EINVAL;
 	}
+
+	/* Set up inbound windows */
+	pci_get_dma_regions(dev, &region, 0);
+	brcm_pcie_set_inbound_wins(pcie, &region);
 
 	/* Mask all interrupts since we are not handling any yet */
 	writel(0xffffffff, base + PCIE_MSI_INTR2_MASK_SET);
