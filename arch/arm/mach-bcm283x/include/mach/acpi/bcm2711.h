@@ -49,20 +49,25 @@
 #define PCIE_RC_DL_MDIO_WR_DATA                   0x1104
 #define PCIE_RC_DL_MDIO_RD_DATA                   0x1108
 
+#define PCIE_RC_PL_PHY_CTL_15                     0x184c
+#define  PCIE_RC_PL_PHY_CTL_15_PM_CLK_PERIOD_MASK 0xff
+
 #define PCIE_MISC_MISC_CTRL                       0x4008
 #define  MISC_CTRL_SCB_ACCESS_EN_MASK             0x1000
 #define  MISC_CTRL_CFG_READ_UR_MODE_MASK          0x2000
 #define  MISC_CTRL_MAX_BURST_SIZE_MASK            0x300000
 #define  MISC_CTRL_MAX_BURST_SIZE_128             0x0
 #define  MISC_CTRL_SCB0_SIZE_MASK                 0xf8000000
+#define  MISC_CTRL_PCIE_RCB_MPS_MODE_MASK         0x400
+#define  MISC_CTRL_PCIE_RCB_64B_MODE_MASK         0x80
 
 #define PCIE_MISC_CPU_2_PCIE_MEM_WIN0_LO          0x400c
 #define PCIE_MISC_CPU_2_PCIE_MEM_WIN0_HI          0x4010
 #define PCIE_MEM_WIN0_LO(win)	\
-		PCIE_MISC_CPU_2_PCIE_MEM_WIN0_LO + ((win) * 4)
+		PCIE_MISC_CPU_2_PCIE_MEM_WIN0_LO + ((win) * 8)
 
 #define PCIE_MEM_WIN0_HI(win)	\
-		PCIE_MISC_CPU_2_PCIE_MEM_WIN0_HI + ((win) * 4)
+		PCIE_MISC_CPU_2_PCIE_MEM_WIN0_HI + ((win) * 8)
 #define PCIE_MISC_RC_BAR1_CONFIG_LO               0x402c
 #define  RC_BAR1_CONFIG_LO_SIZE_MASK                0x1f
 #define PCIE_MISC_RC_BAR2_CONFIG_LO               0x4034
@@ -70,6 +75,11 @@
 #define PCIE_MISC_RC_BAR2_CONFIG_HI               0x4038
 #define PCIE_MISC_RC_BAR3_CONFIG_LO               0x403c
 #define  RC_BAR3_CONFIG_LO_SIZE_MASK                0x1f
+#define PCIE_MISC_RC_BAR4_CONFIG_LO               0x40d4
+
+#define PCIE_MISC_PCIE_CTRL                       0x4064
+#define  PCIE_MISC_PCIE_CTRL_PCIE_PERSTB_MASK    0x4
+
 #define PCIE_MISC_PCIE_STATUS                     0x4068
 #define  STATUS_PCIE_PORT_MASK                      0x80
 #define  STATUS_PCIE_PORT_SHIFT                        7
@@ -93,7 +103,14 @@
 #define PCIE_MEM_WIN0_LIMIT_HI(win)	\
 	 PCIE_MISC_CPU_2_PCIE_MEM_WIN0_LIMIT_HI + ((win) * 8)
 
+#define PCIE_MISC_UBUS_BAR1_CONFIG_REMAP          0x40ac
+#define  PCIE_MISC_UBUS_BAR1_CONFIG_REMAP_ACCESS_EN_MASK  0x1
+#define PCIE_MISC_UBUS_BAR4_CONFIG_REMAP          0x410c
+
+/* BCM2711 HARD_DEBUG offset */
 #define PCIE_MISC_HARD_PCIE_HARD_DEBUG            0x4204
+/* BCM2712 HARD_DEBUG offset */
+#define PCIE_MISC_HARD_PCIE_HARD_DEBUG_BCM7712    0x4304
 #define  PCIE_HARD_DEBUG_SERDES_IDDQ_MASK         0x08000000
 
 #define PCIE_INTR2_CPU_STATUS                 0x4300
