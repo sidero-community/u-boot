@@ -1361,6 +1361,7 @@ static const struct macb_config sama7g5_emac_config = {
 };
 
 static const struct udevice_id macb_eth_ids[] = {
+	{ .compatible = "raspberrypi,rp1-gem" },
 	{ .compatible = "cdns,macb" },
 	{ .compatible = "cdns,at91sam9260-macb" },
 	{ .compatible = "cdns,sam9x60-macb" },
