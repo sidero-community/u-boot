@@ -7,7 +7,10 @@
 #ifndef __DRIVER_NVME_H__
 #define __DRIVER_NVME_H__
 
+#include <phys2bus.h>
 #include <asm/io.h>
+
+#define nvme_to_dev(_dev)	_dev->udev
 
 struct nvme_id_power_state {
 	__le16			max_power;	/* centiwatts */
@@ -704,5 +707,10 @@ int nvme_init(struct udevice *udev);
  * Return: 0 if OK, -ve on error
  */
 int nvme_shutdown(struct udevice *udev);
+
+static inline dma_addr_t nvme_virt_to_bus(struct nvme_dev *dev, void *addr)
+{
+	return dev_phys_to_bus(nvme_to_dev(dev)->parent, virt_to_phys(addr));
+}
 
 #endif /* __DRIVER_NVME_H__ */
