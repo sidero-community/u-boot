@@ -570,6 +570,10 @@ config MACB
 	bool "Cadence MACB/GEM Ethernet Interface"
 	depends on ARM || RISCV
 	select PHYLIB
+	select DM_RESET
+	select DM_GPIO
+	select CLK
+	imply BOARD_LATE_INIT
 	help
 	  The Cadence MACB ethernet interface is found on many Atmel
 	  AT91 and SAMA5 parts.  This driver also supports the Cadence
