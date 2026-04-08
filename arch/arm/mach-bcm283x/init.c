@@ -18,7 +18,7 @@
 #ifdef CONFIG_ARM64
 #include <asm/armv8/mmu.h>
 
-#define MEM_MAP_MAX_ENTRIES (4)
+#define MEM_MAP_MAX_ENTRIES (7)
 
 static struct mm_region bcm283x_mem_map[MEM_MAP_MAX_ENTRIES] = {
 	{
@@ -76,15 +76,31 @@ static struct mm_region bcm2712_mem_map[MEM_MAP_MAX_ENTRIES] = {
 		.attrs = PTE_BLOCK_MEMTYPE(MT_NORMAL) |
 			 PTE_BLOCK_INNER_SHARE
 	}, {
-		/* Beginning of AXI bus where uSD controller lives */
+		/* AXI/PCIe address space - contains PCIe controllers and peripherals
+		 * Maps 0x1000000000-0x1100000000 (4GB range)
+		 */
 		.virt = 0x1000000000UL,
 		.phys = 0x1000000000UL,
-		.size = 0x0002000000UL,
+		.size = 0x0100000000UL,
+		.attrs = PTE_BLOCK_MEMTYPE(MT_DEVICE_NGNRNE) |
+			 PTE_BLOCK_NON_SHARE |
+			 PTE_BLOCK_PXN | PTE_BLOCK_UXN
+		}, {
+		/* PCIe outbound windows for pcie0/1/2 (both 64-bit
+		 * prefetchable and 32-bit non-prefetchable regions).
+		 * Covers CPU 0x14_0000_0000 .. 0x20_0000_0000 (48 GiB).
+		 * Required so that NVMe / xHCI BAR accesses do not fault.
+		 */
+		.virt = 0x1400000000UL,
+		.phys = 0x1400000000UL,
+		.size = 0x0c00000000UL,
 		.attrs = PTE_BLOCK_MEMTYPE(MT_DEVICE_NGNRNE) |
 			 PTE_BLOCK_NON_SHARE |
 			 PTE_BLOCK_PXN | PTE_BLOCK_UXN
 	}, {
-		/* SoC bus */
+		/* SoC peripheral bus - UART, timers, GPIO, etc.
+		 * Ranges from 0x107c000000, mapped to local 0x00000000
+		 */
 		.virt = 0x107c000000UL,
 		.phys = 0x107c000000UL,
 		.size = 0x0004000000UL,
