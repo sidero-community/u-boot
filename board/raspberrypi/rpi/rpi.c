@@ -9,6 +9,7 @@
 #include <dm.h>
 #include <env.h>
 #include <efi_loader.h>
+#include <fdtdec.h>
 #include <fdt_support.h>
 #include <fdt_simplefb.h>
 #include <init.h>
@@ -20,12 +21,15 @@
 #include <asm/arch/sdhci.h>
 #include <asm/global_data.h>
 #include <dm/platform_data/serial_bcm283x_mu.h>
+#include <broadcom/bcm_board_types.h>
 #ifdef CONFIG_ARM64
 #include <asm/armv8/mmu.h>
 #endif
 #include <watchdog.h>
 #include <dm/pinctrl.h>
 #include <dm/ofnode.h>
+#include <dm/device-internal.h>
+#include <dm/uclass.h>
 #include <acpi/acpi_table.h>
 #include <acpi/acpigen.h>
 #include <dm/lists.h>
@@ -546,6 +550,10 @@ static void get_board_revision(void)
 		model = &models[rev_type];
 	}
 
+	#ifdef CONFIG_BOARD_TYPES
+		gd->board_type = rev_type;
+	#endif
+
 	printf("RPI %s (0x%x)\n", model->name, revision);
 }
 
@@ -661,11 +669,62 @@ int ft_board_setup(void *blob, struct bd_info *bd)
 	return 0;
 }
 
+/* TODO: Using late_init to initialize pci device with ID_RP1.
+ * RP1 pci device should be initialized by the PCI subsystem because
+ * it is under develop right now and depends from the final device-tree
+ * format from the Linux Kernel. Current device-tree format violates
+ * pci driver model. So this should be changed after upstreaming RP1
+ * to the Linux Kernel source code.
+ * This initialization should be done only for RPI5 board.
+ */
+#ifdef CONFIG_BCM2712
+int board_late_init(void)
+{
+	struct udevice *dev;
+	int err;
+
+	/* Only scan for RP1 on RPi 5 family boards (BCM2712)
+	 * Board types: RPi 5B, CM5, RPi 500, CM5 Lite
+	 */
+#ifdef CONFIG_BOARD_TYPES
+	if (gd->board_type < RPI_BOARD_TYPE_RPI5_FAMILY_MIN ||
+	    gd->board_type > RPI_BOARD_TYPE_RPI5_FAMILY_MAX) {
+		/* Not a RPi 5 board, skip RP1 detection */
+		return 0;
+	}
+#endif
+
+	err = dm_pci_find_device(PCI_VENDOR_ID_RPI, PCI_DEVICE_ID_RP1_C0,
+				 0, &dev);
+	if (err) {
+		printf("RPI: RP1 device not found\n");
+		return 0;
+	}
+
+	/* Probe the RP1 MFD device to initialize its children
+	 * (GPIO, clocks, UART, USB, Ethernet, etc.)
+	 */
+	err = device_probe(dev);
+	if (err) {
+		printf("RPI: Failed to probe RP1 device: %d\n", err);
+		return err;
+	}
+
+	printf("RPI: RP1 initialized successfully\n");
+
+	return 0;
+}
+#endif
+
 #if CONFIG_IS_ENABLED(GENERATE_ACPI_TABLE)
+static bool is_rpi5(void)
+{
+	return of_machine_is_compatible("brcm,bcm2712");
+}
+
 static bool is_rpi4(void)
 {
-	return of_machine_is_compatible("brcm,bcm2711") ||
-	       of_machine_is_compatible("brcm,bcm2712");
+	return of_machine_is_compatible("brcm,bcm2711");
 }
 
 static bool is_rpi3(void)
@@ -681,30 +740,33 @@ static int acpi_rpi_board_fill_ssdt(struct acpi_ctx *ctx)
 	struct {
 		const char *fdt_compatible;
 		const char *acpi_scope;
+		bool on_rpi5;
 		bool on_rpi4;
 		bool on_rpi3;
 		u32 mmio_address;
 	} map[] = {
-		{"brcm,bcm2711-pcie", "\\_SB.PCI0", true, false},
-		{"brcm,bcm2711-emmc2", "\\_SB.GDV1.SDC3", true, false},
-		{"brcm,bcm2835-pwm", "\\_SB.GDV0.PWM0", true, true},
-		{"brcm,bcm2711-genet-v5",  "\\_SB.ETH0", true, false},
-		{"brcm,bcm2711-thermal", "\\_SB.EC00", true, true},
-		{"brcm,bcm2835-sdhci", "\\_SB.SDC1", true, true},
-		{"brcm,bcm2835-sdhost", "\\_SB.SDC2", false, true},
-		{"brcm,bcm2835-mbox", "\\_SB.GDV0.RPIQ", true, true},
-		{"brcm,bcm2835-i2c", "\\_SB.GDV0.I2C1", true, true, 0xfe205000},
-		{"brcm,bcm2835-i2c", "\\_SB.GDV0.I2C2", true, true, 0xfe804000},
-		{"brcm,bcm2835-spi", "\\_SB.GDV0.SPI0", true, true},
-		{"brcm,bcm2835-aux-spi", "\\_SB.GDV0.SPI1", true, true, 0xfe215080},
-		{"arm,pl011", "\\_SB.URT0", true, true},
-		{"brcm,bcm2835-aux-uart", "\\_SB.URTM", true, true},
+		{"brcm,bcm2711-pcie", "\\_SB.PCI0", false, true, false},
+		{"brcm,bcm2711-emmc2", "\\_SB.GDV1.SDC3", false, true, false},
+		{"brcm,bcm2835-pwm", "\\_SB.GDV0.PWM0", false, true, true},
+		{"brcm,bcm2711-genet-v5",  "\\_SB.ETH0", false, true, false},
+		{"raspberrypi,rp1-gem", "\\_SB.ETH0", true, false, false},
+		{"brcm,bcm2711-thermal", "\\_SB.EC00", false, true, true},
+		{"brcm,bcm2835-sdhci", "\\_SB.SDC1", false, true, true},
+		{"brcm,bcm2835-sdhost", "\\_SB.SDC2", false, false, true},
+		{"brcm,bcm2835-mbox", "\\_SB.GDV0.RPIQ", false, true, true},
+		{"brcm,bcm2835-i2c", "\\_SB.GDV0.I2C1", false, true, true, 0xfe205000},
+		{"brcm,bcm2835-i2c", "\\_SB.GDV0.I2C2", false, true, true, 0xfe804000},
+		{"brcm,bcm2835-spi", "\\_SB.GDV0.SPI0", false, true, true},
+		{"brcm,bcm2835-aux-spi", "\\_SB.GDV0.SPI1", false, true, true, 0xfe215080},
+		{"arm,pl011", "\\_SB.URT0", false, true, true},
+		{"brcm,bcm2835-aux-uart", "\\_SB.URTM", false, true, true},
 		{ /* Sentinel */ }
 	};
 
 	/* Device enable */
 	for (int i = 0; map[i].fdt_compatible; i++) {
-		if ((is_rpi4() && !map[i].on_rpi4) ||
+		if ((is_rpi5() && !map[i].on_rpi5) ||
+		    (is_rpi4() && !map[i].on_rpi4) ||
 		    (is_rpi3() && !map[i].on_rpi3)) {
 			enabled = false;
 		} else {
@@ -743,7 +805,7 @@ static int acpi_rpi_board_fill_ssdt(struct acpi_ctx *ctx)
 	acpigen_write_name_integer(ctx, "_STA", enabled ? 0xf : 0);
 	acpigen_pop_len(ctx);
 
-	if (is_rpi4()) {
+	if (is_rpi4() || is_rpi5()) {
 		/* eMMC quirks */
 		node = fdt_node_offset_by_compatible(gd->fdt_blob, -1, "brcm,bcm2711-emmc2");
 		if (node) {

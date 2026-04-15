@@ -81,7 +81,7 @@ static int xhci_brcm_deregister(struct udevice *dev)
 }
 
 static const struct udevice_id xhci_brcm_ids[] = {
-	{ .compatible = "brcm,generic-xhci" },
+	{ .compatible = "generic-xhci" },
 	{ }
 };
 
