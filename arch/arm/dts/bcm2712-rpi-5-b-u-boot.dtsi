@@ -1,0 +1,101 @@
+/* * PCIe DMA Override
+ *
+ * U-Boot's dm_pci_bus_to_phys() cannot parse the upstream dma-ranges which
+ * mix 0x02000000 / 0x03000000 (non-prefetchable) type flags with multiple
+ * entries.  Replace with a single 64-bit prefetchable (0x43000000) entry.
+ *
+ * Upstream maps PCIe address 0x10_0000_0000 → CPU physical 0x0 for 64 GiB
+ * on all three controllers.  We keep that same translation but unify the
+ * type flag to 0x43000000 and drop the secondary MIP / BAR entries that
+ * U-Boot does not need.
+ *
+ * pcie1: upstream has 0x03000000 (non-pref) + MIP1 → single 0x43000000
+ * pcie2: upstream has 0x02000000 + 0x43000000 + MIP0 → single 0x43000000
+ */
+&pcie1 {
+    dma-ranges = <0x43000000 0x10 0x00000000  0x0 0x00000000  0x10 0x00000000>;
+};
+
+/* * RP1 Southbridge — PCIe2 overrides
+ *
+ * The RP1 south bridge sits behind pcie2 as a PCI endpoint (dev@0,0)
+ * inside a virtual PCI-PCI bridge (pci@0,0).
+ *
+ * DMA path: RP1 peripheral → pci_ep_bus dma-ranges (bus 0x10_0000_0000
+ * → PCIe 0x10_0000_0000) → dev@0,0 (passthrough, no dma-ranges) →
+ * pci@0,0 (passthrough) → pcie2 dma-ranges (PCIe 0x10_0000_0000 →
+ * CPU 0x0).  We must NOT add dma-ranges to dev@0,0 — upstream omits
+ * them intentionally so addresses pass through unchanged.
+ *
+ * bootph-all on pci@0,0 and dev@0,0 ensures U-Boot's driver model
+ * probes through the full PCIe → PCI bridge → RP1 chain.
+ */
+&pcie2 {
+    dma-ranges = <0x43000000 0x10 0x00000000  0x0 0x00000000  0x10 0x00000000>;
+
+    pci@0,0 {
+        bootph-all;
+
+        dev@0,0 {
+            bootph-all;
+        };
+    };
+};
+
+/* * 3. RP1 Peripheral Aliases 
+ * Helps U-Boot find the Ethernet/USB without scanning the whole bus immediately.
+ */
+/ {
+    aliases {
+        ethernet0 = &rp1_eth;
+    };
+};
+
+/* Enable specific peripherals behind RP1 */
+&rp1_eth {
+    status = "okay";
+};
+
+&rp1_usb0 {
+    status = "okay";
+};
+
+&rp1_usb1 {
+    status = "okay";
+};
+
+/ {
+    smbios {
+        compatible = "u-boot,sysinfo-smbios";
+
+        smbios {
+            /* Type 1 — System Information
+             * serial is intentionally empty; overridden at runtime by the
+             * serial# U-Boot environment variable, which must contain the
+             * full Talos NoCloud datasource string:
+             *   ds=nocloud-net;s=http://<server>/configs/;h=<hostname>
+             * Set via: fw_setenv -c /boot/fw_env.config serial# "ds=nocloud-net;..."
+             */
+            system {
+                manufacturer = "Raspberry Pi";
+                product = "5 Model B";
+                version = "";
+                serial = "";
+                sku = "";
+                family = "Raspberry Pi";
+            };
+
+            /* Type 2 — Baseboard Information */
+            baseboard {
+                manufacturer = "Raspberry Pi";
+                product = "5 Model B";
+                asset-tag = "";
+            };
+
+            /* Type 3 — Chassis Information */
+            chassis {
+                manufacturer = "Raspberry Pi";
+            };
+        };
+    };
+};

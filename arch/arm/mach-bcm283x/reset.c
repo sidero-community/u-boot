@@ -45,6 +45,7 @@ __reset_cpu(struct bcm2835_wdog_regs *wdog_regs, ulong ticks)
 	writel(BCM2835_WDOG_PASSWORD | rstc, &wdog_regs->rstc);
 }
 
+#if !CONFIG_IS_ENABLED(SYSRESET)
 void reset_cpu(void)
 {
 	struct bcm2835_wdog_regs *regs =
@@ -52,6 +53,7 @@ void reset_cpu(void)
 
 	__reset_cpu(regs, 0);
 }
+#endif
 
 #ifdef CONFIG_EFI_LOADER
 

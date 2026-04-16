@@ -18,12 +18,12 @@ struct nvme_dev;
  * @dev:	NVMe controller device
  * @nsid:	0 for controller, namespace id for namespace to identify
  * @cns:	1 for controller, 0 for namespace
- * @dma_addr:	dma buffer address to store the identify result
+ * @buffer:	dma buffer address to store the identify result
  * @return:	0 on success, -ETIMEDOUT on command execution timeout,
  *		-EIO on command execution fails
  */
 int nvme_identify(struct nvme_dev *dev, unsigned nsid,
-		  unsigned cns, dma_addr_t dma_addr);
+		  unsigned int cns, void *buffer);
 
 /**
  * nvme_get_features - retrieve the attributes of the feature specified
@@ -33,13 +33,13 @@ int nvme_identify(struct nvme_dev *dev, unsigned nsid,
  * @dev:	NVMe controller device
  * @fid:	feature id to provide data
  * @nsid:	namespace id the command applies to
- * @dma_addr:	data structure used as part of the specified feature
+ * @buffer:	data structure used as part of the specified feature
  * @result:	command-specific result in the completion queue entry
  * @return:	0 on success, -ETIMEDOUT on command execution timeout,
  *		-EIO on command execution fails
  */
 int nvme_get_features(struct nvme_dev *dev, unsigned fid, unsigned nsid,
-		      dma_addr_t dma_addr, u32 *result);
+		      void *buffer, u32 *result);
 
 /**
  * nvme_set_features - specify the attributes of the feature indicated
@@ -49,13 +49,13 @@ int nvme_get_features(struct nvme_dev *dev, unsigned fid, unsigned nsid,
  * @dev:	NVMe controller device
  * @fid:	feature id to provide data
  * @dword11:	command-specific input parameter
- * @dma_addr:	data structure used as part of the specified feature
+ * @buffer:	data structure used as part of the specified feature
  * @result:	command-specific result in the completion queue entry
  * @return:	0 on success, -ETIMEDOUT on command execution timeout,
  *		-EIO on command execution fails
  */
 int nvme_set_features(struct nvme_dev *dev, unsigned fid, unsigned dword11,
-		      dma_addr_t dma_addr, u32 *result);
+		      void *buffer, u32 *result);
 
 /**
  * nvme_scan_namespace - scan all namespaces attached to NVMe controllers
