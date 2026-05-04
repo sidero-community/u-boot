@@ -142,6 +142,15 @@ config BCM2835_GPIO
 	bool "BCM2835 GPIO driver"
 	depends on DM_GPIO && ARCH_BCM283X
 
+config BRCMSTB_GPIO
+	bool "Broadcom STB UPG GIO GPIO driver"
+	depends on DM_GPIO
+	help
+	  Support for the Broadcom STB "UPG GIO" GPIO controller found in
+	  BCM2712 (Raspberry Pi 5) and other Broadcom STB SoCs. This driver
+	  handles the SoC-level GIO and GIO_AON GPIO banks which are used
+	  for power button input, SD card detect, and other board functions.
+
 config BCM6345_GPIO
 	bool "BCM6345 GPIO driver"
 	depends on DM_GPIO && (ARCH_BMIPS || BCM6856 || \
@@ -412,6 +421,14 @@ config RCAR_GPIO
 	depends on DM_GPIO && ARCH_RENESAS
 	help
 	  This driver supports the GPIO banks on Renesas R-Car SoCs.
+
+config RP1_GPIO
+	bool "Raspberry PR1 GPIO driver"
+	depends on DM_GPIO && ARCH_BCM283X
+	help
+	  This driver supports the GPIO banks on Raspberry RP1 chip.
+	  Raspberry PI5 has an external chip RP1 installed, which
+	  provides it's own GPIO controller.
 
 config RZA1_GPIO
 	bool "Renesas RZ/A1 GPIO driver"

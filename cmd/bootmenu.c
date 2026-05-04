@@ -581,9 +581,22 @@ static enum bootmenu_ret bootmenu_show(int uefi, int delay)
 	/* Default menu entry is always first */
 	menu_default_set(menu, "0");
 
+	/* Drain any stale input (e.g. terminal CPR responses) */
+	while (tstc())
+		getchar();
+
 	puts(ANSI_CURSOR_HIDE);
 	puts(ANSI_CLEAR_CONSOLE);
 	printf(ANSI_CURSOR_POSITION, 1, 1);
+
+	/*
+	 * Allow time for the terminal to process ANSI sequences and
+	 * flush any response characters (e.g. CPR replies) before
+	 * the menu starts reading input.
+	 */
+	mdelay(100);
+	while (tstc())
+		getchar();
 
 	init = 1;
 
