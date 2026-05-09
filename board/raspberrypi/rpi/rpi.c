@@ -9,27 +9,35 @@
 #include <dm.h>
 #include <env.h>
 #include <efi_loader.h>
+#include <fdtdec.h>
 #include <fdt_support.h>
 #include <fdt_simplefb.h>
 #include <init.h>
 #include <memalign.h>
 #include <mmc.h>
 #include <asm/gpio.h>
+#include <asm/io.h>
 #include <asm/arch/mbox.h>
 #include <asm/arch/msg.h>
 #include <asm/arch/sdhci.h>
 #include <asm/global_data.h>
 #include <dm/platform_data/serial_bcm283x_mu.h>
+#include <broadcom/bcm_board_types.h>
 #ifdef CONFIG_ARM64
 #include <asm/armv8/mmu.h>
 #endif
 #include <watchdog.h>
 #include <dm/pinctrl.h>
 #include <dm/ofnode.h>
+#include <dm/device-internal.h>
+#include <dm/uclass.h>
 #include <acpi/acpi_table.h>
 #include <acpi/acpigen.h>
 #include <dm/lists.h>
 #include <tables_csum.h>
+#if defined(CONFIG_BCM2712) && defined(CONFIG_CYCLIC)
+#include <cyclic.h>
+#endif
 
 DECLARE_GLOBAL_DATA_PTR;
 
@@ -546,6 +554,10 @@ static void get_board_revision(void)
 		model = &models[rev_type];
 	}
 
+	#ifdef CONFIG_BOARD_TYPES
+		gd->board_type = rev_type;
+	#endif
+
 	printf("RPI %s (0x%x)\n", model->name, revision);
 }
 
@@ -607,10 +619,24 @@ void  update_fdt_from_fw(void *fdt, void *fw_fdt)
 	copy_property(fdt, fw_fdt, "/reserved-memory/linux,cma", "size");
 
 	/* Adjust dma-ranges for the SD card and PCI bus as they can depend on
-	 * the SoC revision
+	 * the SoC revision.
+	 *
+	 * RPi4 (BCM2711): emmc2bus and pcie0 are exposed as firmware aliases.
+	 *
+	 * RPi5 (BCM2712): the firmware DT has no pcie0/1/2 aliases, so the
+	 * alias-based calls silently fail.  Use the absolute AXI paths instead:
+	 *   pcie0 @ 1000100000  — first PCIe root port
+	 *   pcie1 @ 1000110000  — second PCIe root port (NVMe)
+	 *   pcie2 @ 1000120000  — third PCIe root port (RP1 southbridge)
+	 * All three need their firmware-provided dma-ranges because the firmware
+	 * adjusts them based on silicon revision.
 	 */
-	copy_property(fdt, fw_fdt, "emmc2bus", "dma-ranges");
-	copy_property(fdt, fw_fdt, "pcie0", "dma-ranges");
+	copy_property(fdt, fw_fdt, "emmc2bus", "dma-ranges");	/* RPi4 */
+	copy_property(fdt, fw_fdt, "pcie0", "dma-ranges");	/* RPi4 alias */
+	/* RPi5 absolute paths (no pcie aliases in firmware DT) */
+	copy_property(fdt, fw_fdt, "/axi/pcie@1000100000", "dma-ranges");
+	copy_property(fdt, fw_fdt, "/axi/pcie@1000110000", "dma-ranges");
+	copy_property(fdt, fw_fdt, "/axi/pcie@1000120000", "dma-ranges");
 
 	/* Bootloader configuration template exposes as nvmem */
 	if (copy_property(fdt, fw_fdt, "blconfig", "reg") == 0)
@@ -625,8 +651,17 @@ void  update_fdt_from_fw(void *fdt, void *fw_fdt)
 	/* firmware logs - used by the vclog utility */
 	copy_property(fdt, fw_fdt, "/chosen", "log");
 
-	/* address of the PHY device as provided by the firmware  */
+	/* MAC address set by firmware on both RPi4 (GENET) and RPi5 (RP1 GEM) */
+	copy_property(fdt, fw_fdt, "ethernet0", "local-mac-address");
+	/* PHY address as provided by the firmware */
+	/* RPi4: GENET internal MDIO controller at register offset 0xe14 */
 	copy_property(fdt, fw_fdt, "ethernet0/mdio@e14/ethernet-phy@1", "reg");
+	/*
+	 * RPi5: RP1 GEM (raspberrypi,rp1-gem / cdns,macb).  In both the
+	 * firmware DT and the upstream raspberrypi/linux 6.18 DT, phy1 is a
+	 * direct child of rp1_eth — there is no intermediate mdio subnode.
+	 */
+	copy_property(fdt, fw_fdt, "ethernet0/ethernet-phy@1", "reg");
 
 	/* Bluetooth device address as provided by the firmware */
 	copy_property(fdt, fw_fdt, "/soc/serial@7e201000/bluetooth", "local-bd-address");
@@ -661,11 +696,330 @@ int ft_board_setup(void *blob, struct bd_info *bd)
 	return 0;
 }
 
+/* TODO: Using late_init to initialize pci device with ID_RP1.
+ * RP1 pci device should be initialized by the PCI subsystem because
+ * it is under develop right now and depends from the final device-tree
+ * format from the Linux Kernel. Current device-tree format violates
+ * pci driver model. So this should be changed after upstreaming RP1
+ * to the Linux Kernel source code.
+ * This initialization should be done only for RPI5 board.
+ */
+#ifdef CONFIG_BCM2712
+
+/*
+ * Power button monitoring via GIO edge detection.
+ *
+ * The RPi 5 power button (J2 header / on-board switch) goes through the
+ * PMIC, which signals the VPU firmware, which drives GIO GPIO20 low.
+ * The pulse can be very short (~100-200ms from KVM devices), so simple
+ * level-polling at 100ms intervals misses it.
+ *
+ * Instead we configure the GIO hardware for falling-edge detection.
+ * The STAT register latches the edge and stays set until explicitly
+ * cleared (write-1-to-clear), so even a microsecond pulse is captured.
+ * We poll STAT (plus a level fallback) to reliably detect presses.
+ */
+#if defined(CONFIG_CYCLIC) && defined(CONFIG_DM_GPIO)
+
+#include <asm/arch/wdog.h>
+
+/* GIO per-bank register offsets (each bank is 0x20 bytes) */
+#define GIO_BANK_SIZE	0x20
+#define GIO_REG_EC	0x0c	/* edge config: 0 = falling, 1 = rising (per Linux gpio-brcmstb.c) */
+#define GIO_REG_EI	0x10	/* edge-insensitive: set to detect both edges, clear to follow EC */
+#define GIO_REG_MASK	0x14	/* interrupt mask: must be set for STAT to latch edge events */
+#define GIO_REG_STAT	0x1c	/* interrupt status (sticky, write-1-to-clear) */
+
+#define RPI_PWR_BTN_POLL_US	50000	/* 50ms polling interval */
+
+struct rpi_power_btn_ctx {
+	struct cyclic_info cyclic;
+	struct gpio_desc gpio;		/* DM GPIO handle (level reads + diagnostics) */
+	void __iomem *bank_base;	/* direct GIO bank register base (edge detect) */
+	u32 bit_mask;			/* bit within the bank for the power GPIO */
+	bool power_off_on_halt;		/* POWER_OFF_ON_HALT from EEPROM bootloader config */
+};
+
+static struct rpi_power_btn_ctx rpi_pwr_btn;
+
+/*
+ * Read POWER_OFF_ON_HALT from the EEPROM bootloader config exposed by the VPU
+ * firmware via the blconfig nvmem-rmem region in the firmware device tree.
+ *
+ * The firmware copies the EEPROM text config into reserved memory and updates
+ * the blconfig node's reg property with the physical address and size before
+ * handing off to U-Boot.  The config is a plain-text key=value file, e.g.:
+ *   POWER_OFF_ON_HALT=1
+ *
+ * Returns true only when POWER_OFF_ON_HALT=1 is found in that config.
+ */
+static bool rpi_eeprom_power_off_on_halt(void)
+{
+	void *fw_fdt = (void *)fw_dtb_pointer;
+	struct fdt_resource res;
+	int node, ret;
+	const char *cfg, *p, *end;
+
+	if (!fw_fdt || fdt_magic(fw_fdt) != FDT_MAGIC)
+		return false;
+
+	/*
+	 * "blconfig" is an alias in the firmware DT that resolves to the
+	 * nvmem-rmem node whose reg property the firmware has filled in with
+	 * the physical address of the EEPROM config copy in reserved memory.
+	 *
+	 * fdt_get_resource() reads the parent's #address-cells/#size-cells
+	 * automatically, so the 4-cell encoding used by BCM2711/BCM2712
+	 * (<addr_hi addr_lo size_hi size_lo>) is handled correctly.
+	 */
+	node = fdt_path_offset(fw_fdt, "blconfig");
+	if (node < 0)
+		return false;
+
+	ret = fdt_get_resource(fw_fdt, node, "reg", 0, &res);
+	if (ret || !res.start || res.start == res.end)
+		return false;
+
+	cfg = (const char *)(uintptr_t)res.start;
+	end = (const char *)(uintptr_t)(res.end + 1);
+
+	for (p = cfg; p < end && *p; ) {
+		if ((end - p) > 18 && !strncmp(p, "POWER_OFF_ON_HALT=", 18))
+			return p[18] == '1';
+		/* advance to the next line */
+		while (p < end && *p && *p != '\n')
+			p++;
+		if (p < end && *p == '\n')
+			p++;
+	}
+
+	return false;
+}
+
+/*
+ * Signal the VPU firmware to halt (partition 63 in RSTS) before triggering
+ * the watchdog reset.  The firmware reads RSTS on startup: partition 63 means
+ * "halt".  With POWER_OFF_ON_HALT=1 in the EEPROM bootloader config the PMIC
+ * is commanded to cut power; without it the firmware waits for a
+ * power-button press before restarting.
+ */
+#define RPI_WDOG_RSTS_HALT	0x555	/* partition 63 – halt signal to VPU */
+
+static void rpi_signal_poweroff(void)
+{
+	struct bcm2835_wdog_regs *regs =
+		(struct bcm2835_wdog_regs *)BCM2835_WDOG_PHYSADDR;
+	u32 val;
+
+	val = readl(&regs->rsts);
+	val |= BCM2835_WDOG_PASSWORD;
+	val |= RPI_WDOG_RSTS_HALT;
+	writel(val, &regs->rsts);
+
+	reset_cpu();
+}
+
+static void rpi_power_btn_poll(struct cyclic_info *c)
+{
+	struct rpi_power_btn_ctx *ctx =
+		container_of(c, struct rpi_power_btn_ctx, cyclic);
+
+	/* Primary: check hardware edge-triggered status (catches short pulses) */
+	if (ctx->bank_base) {
+		u32 stat = readl(ctx->bank_base + GIO_REG_STAT);
+
+		if (stat & ctx->bit_mask) {
+			writel(ctx->bit_mask, ctx->bank_base + GIO_REG_STAT);
+			if (ctx->power_off_on_halt) {
+				printf("\nRPI: Power button pressed, powering off...\n");
+				rpi_signal_poweroff();
+			} else {
+				printf("\nRPI: Power button pressed, resetting...\n");
+				reset_cpu();
+			}
+			return;
+		}
+	}
+
+	/* Fallback: level-based detection for sustained holds */
+	if (dm_gpio_get_value(&ctx->gpio) > 0) {
+		if (ctx->power_off_on_halt) {
+			printf("\nRPI: Power button held, powering off...\n");
+			rpi_signal_poweroff();
+		} else {
+			printf("\nRPI: Power button held, resetting...\n");
+			reset_cpu();
+		}
+	}
+}
+
+static void rpi_register_power_button(void)
+{
+	ofnode keys_node, btn_node;
+	struct udevice *gpio_dev;
+	void __iomem *gio_base;
+	u32 bank_widths[4];
+	int num_banks, i, bank;
+	u32 gpio_offset, offset;
+	u32 val;
+	int ret;
+
+	keys_node = ofnode_by_compatible(ofnode_null(), "gpio-keys");
+	if (!ofnode_valid(keys_node))
+		return;
+
+	ofnode_for_each_subnode(btn_node, keys_node) {
+		const char *label = ofnode_read_string(btn_node, "label");
+
+		if (label && !strcmp(label, "pwr_button"))
+			break;
+	}
+
+	if (!ofnode_valid(btn_node)) {
+		log_debug("RPI: power button node not found\n");
+		return;
+	}
+
+	/* Request GPIO through DM — ensures it is claimed and set as input */
+	ret = gpio_request_by_name_nodev(btn_node, "gpios", 0,
+					 &rpi_pwr_btn.gpio, GPIOD_IS_IN);
+	if (ret) {
+		log_debug("RPI: failed to request power button GPIO: %d\n", ret);
+		return;
+	}
+
+	/*
+	 * Set up edge detection directly on the GIO hardware registers.
+	 * The DM GPIO layer doesn't expose interrupt/edge functionality,
+	 * so we access the controller registers via the parent device.
+	 */
+	gpio_dev = rpi_pwr_btn.gpio.dev;
+	gpio_offset = rpi_pwr_btn.gpio.offset;
+
+	gio_base = dev_remap_addr(gpio_dev);
+	if (!gio_base) {
+		printf("RPI: cannot map GIO registers, edge detect unavailable\n");
+		goto register_cyclic;
+	}
+
+	/* Determine which bank and bit position this GPIO falls in */
+	num_banks = dev_read_size(gpio_dev, "brcm,gpio-bank-widths");
+	if (num_banks < 0) {
+		printf("RPI: missing bank-widths, edge detect unavailable\n");
+		goto register_cyclic;
+	}
+	num_banks /= sizeof(u32);
+	if (num_banks > ARRAY_SIZE(bank_widths)) {
+		printf("RPI: too many banks, edge detect unavailable\n");
+		goto register_cyclic;
+	}
+	dev_read_u32_array(gpio_dev, "brcm,gpio-bank-widths",
+			   bank_widths, num_banks);
+
+	offset = gpio_offset;
+	bank = -1;
+	for (i = 0; i < num_banks; i++) {
+		if (offset < bank_widths[i]) {
+			bank = i;
+			break;
+		}
+		offset -= bank_widths[i];
+	}
+	if (bank < 0) {
+		printf("RPI: GPIO%u out of range, edge detect unavailable\n",
+		       gpio_offset);
+		goto register_cyclic;
+	}
+
+	rpi_pwr_btn.bank_base = gio_base + bank * GIO_BANK_SIZE;
+	rpi_pwr_btn.bit_mask = BIT(offset);
+
+	/*
+	 * Configure falling-edge detection for active-low power button.
+	 * Per Linux gpio-brcmstb.c: EC=0 → falling edge, EC=1 → rising edge.
+	 * EI (edge-insensitive) must be clear so the EC direction is respected;
+	 * setting EI would detect both edges regardless of EC.
+	 */
+	val = readl(rpi_pwr_btn.bank_base + GIO_REG_EC);
+	val &= ~rpi_pwr_btn.bit_mask;		/* clear = falling edge */
+	writel(val, rpi_pwr_btn.bank_base + GIO_REG_EC);
+
+	val = readl(rpi_pwr_btn.bank_base + GIO_REG_EI);
+	val &= ~rpi_pwr_btn.bit_mask;		/* clear = use EC direction, not both-edges */
+	writel(val, rpi_pwr_btn.bank_base + GIO_REG_EI);
+
+	/* Enable MASK so hardware latches the edge into STAT */
+	val = readl(rpi_pwr_btn.bank_base + GIO_REG_MASK);
+	val |= rpi_pwr_btn.bit_mask;
+	writel(val, rpi_pwr_btn.bank_base + GIO_REG_MASK);
+
+	/* Clear any stale edge status */
+	writel(rpi_pwr_btn.bit_mask, rpi_pwr_btn.bank_base + GIO_REG_STAT);
+
+register_cyclic:
+	rpi_pwr_btn.power_off_on_halt = rpi_eeprom_power_off_on_halt();
+
+	cyclic_register(&rpi_pwr_btn.cyclic, rpi_power_btn_poll,
+			RPI_PWR_BTN_POLL_US, "rpi_pwr_btn");
+
+	printf("RPI: Power button monitoring enabled (GPIO%u, %s, %s)\n",
+	       gpio_offset,
+	       rpi_pwr_btn.bank_base ? "edge+level" : "level-only",
+	       rpi_pwr_btn.power_off_on_halt ? "power-off" : "reset");
+}
+#else
+static inline void rpi_register_power_button(void) {}
+#endif /* CONFIG_CYCLIC && CONFIG_DM_GPIO */
+
+int board_late_init(void)
+{
+	struct udevice *dev;
+	int err;
+
+	/* Only scan for RP1 on RPi 5 family boards (BCM2712)
+	 * Board types: RPi 5B, CM5, RPi 500, CM5 Lite
+	 */
+#ifdef CONFIG_BOARD_TYPES
+	if (gd->board_type < RPI_BOARD_TYPE_RPI5_FAMILY_MIN ||
+	    gd->board_type > RPI_BOARD_TYPE_RPI5_FAMILY_MAX) {
+		/* Not a RPi 5 board, skip RP1 detection */
+		return 0;
+	}
+#endif
+
+	err = dm_pci_find_device(PCI_VENDOR_ID_RPI, PCI_DEVICE_ID_RP1_C0,
+				 0, &dev);
+	if (err) {
+		printf("RPI: RP1 device not found\n");
+		return 0;
+	}
+
+	/* Probe the RP1 MFD device to initialize its children
+	 * (GPIO, clocks, UART, USB, Ethernet, etc.)
+	 */
+	err = device_probe(dev);
+	if (err) {
+		printf("RPI: Failed to probe RP1 device: %d\n", err);
+		return err;
+	}
+
+	printf("RPI: RP1 initialized successfully\n");
+
+	rpi_register_power_button();
+
+	return 0;
+}
+#endif
+
 #if CONFIG_IS_ENABLED(GENERATE_ACPI_TABLE)
+static bool is_rpi5(void)
+{
+	return of_machine_is_compatible("brcm,bcm2712");
+}
+
 static bool is_rpi4(void)
 {
-	return of_machine_is_compatible("brcm,bcm2711") ||
-	       of_machine_is_compatible("brcm,bcm2712");
+	return of_machine_is_compatible("brcm,bcm2711");
 }
 
 static bool is_rpi3(void)
@@ -681,30 +1035,34 @@ static int acpi_rpi_board_fill_ssdt(struct acpi_ctx *ctx)
 	struct {
 		const char *fdt_compatible;
 		const char *acpi_scope;
+		bool on_rpi5;
 		bool on_rpi4;
 		bool on_rpi3;
 		u32 mmio_address;
 	} map[] = {
-		{"brcm,bcm2711-pcie", "\\_SB.PCI0", true, false},
-		{"brcm,bcm2711-emmc2", "\\_SB.GDV1.SDC3", true, false},
-		{"brcm,bcm2835-pwm", "\\_SB.GDV0.PWM0", true, true},
-		{"brcm,bcm2711-genet-v5",  "\\_SB.ETH0", true, false},
-		{"brcm,bcm2711-thermal", "\\_SB.EC00", true, true},
-		{"brcm,bcm2835-sdhci", "\\_SB.SDC1", true, true},
-		{"brcm,bcm2835-sdhost", "\\_SB.SDC2", false, true},
-		{"brcm,bcm2835-mbox", "\\_SB.GDV0.RPIQ", true, true},
-		{"brcm,bcm2835-i2c", "\\_SB.GDV0.I2C1", true, true, 0xfe205000},
-		{"brcm,bcm2835-i2c", "\\_SB.GDV0.I2C2", true, true, 0xfe804000},
-		{"brcm,bcm2835-spi", "\\_SB.GDV0.SPI0", true, true},
-		{"brcm,bcm2835-aux-spi", "\\_SB.GDV0.SPI1", true, true, 0xfe215080},
-		{"arm,pl011", "\\_SB.URT0", true, true},
-		{"brcm,bcm2835-aux-uart", "\\_SB.URTM", true, true},
+		{"brcm,bcm2711-pcie", "\\_SB.PCI0", false, true, false},
+		{"brcm,bcm2711-emmc2", "\\_SB.GDV1.SDC3", false, true, false},
+		{"brcm,bcm2835-pwm", "\\_SB.GDV0.PWM0", false, true, true},
+		{"brcm,bcm2711-genet-v5",  "\\_SB.ETH0", false, true, false},
+		{"raspberrypi,rp1-gem", "\\_SB.ETH0", true, false, false},
+		{"brcm,bcm2711-thermal", "\\_SB.EC00", false, true, true},
+		{"brcm,bcm2835-sdhci", "\\_SB.SDC1", false, true, true},
+		{"brcm,bcm2835-sdhost", "\\_SB.SDC2", false, false, true},
+		{"brcm,bcm2835-mbox", "\\_SB.GDV0.RPIQ", true, true, true},
+		{"brcm,bcm2835-i2c", "\\_SB.GDV0.I2C1", false, true, true, 0xfe205000},
+		{"brcm,bcm2835-i2c", "\\_SB.GDV0.I2C2", false, true, true, 0xfe804000},
+		{"brcm,bcm2835-spi", "\\_SB.GDV0.SPI0", false, true, true},
+		{"brcm,bcm2835-aux-spi", "\\_SB.GDV0.SPI1", false, true, true, 0xfe215080},
+		{"arm,pl011", "\\_SB.URT0", true, true, true},
+		{"brcm,bcm2835-aux-uart", "\\_SB.URTM", false, true, true},
+		{"brcm,bcm2712-sdhci", "\\_SB.GDV1.SDC3", true, false, false},
 		{ /* Sentinel */ }
 	};
 
 	/* Device enable */
 	for (int i = 0; map[i].fdt_compatible; i++) {
-		if ((is_rpi4() && !map[i].on_rpi4) ||
+		if ((is_rpi5() && !map[i].on_rpi5) ||
+		    (is_rpi4() && !map[i].on_rpi4) ||
 		    (is_rpi3() && !map[i].on_rpi3)) {
 			enabled = false;
 		} else {
@@ -743,26 +1101,37 @@ static int acpi_rpi_board_fill_ssdt(struct acpi_ctx *ctx)
 	acpigen_write_name_integer(ctx, "_STA", enabled ? 0xf : 0);
 	acpigen_pop_len(ctx);
 
-	if (is_rpi4()) {
-		/* eMMC quirks */
-		node = fdt_node_offset_by_compatible(gd->fdt_blob, -1, "brcm,bcm2711-emmc2");
-		if (node) {
-			phys_addr_t cpu;
-			dma_addr_t bus;
-			u64 size;
-
-			ret = fdt_get_dma_range(gd->fdt_blob, node, &cpu, &bus, &size);
-
+	if (is_rpi4() || is_rpi5()) {
+		/* eMMC/SD quirks: generate _DMA method for \._SB.GDV1 */
+		if (is_rpi5())
+			/* BCM2712 uses brcm,bcm2712-sdhci; external SD is sdio2 */
+			node = fdt_node_offset_by_compatible(gd->fdt_blob, -1,
+							     "brcm,bcm2712-sdhci");
+		else
+			node = fdt_node_offset_by_compatible(gd->fdt_blob, -1,
+							     "brcm,bcm2711-emmc2");
+		if (node >= 0) {
 			acpigen_write_scope(ctx, "\\_SB.GDV1");
 			acpigen_write_method_serialized(ctx, "_DMA", 0);
 			acpigen_emit_byte(ctx, RETURN_OP);
 
-			if (!ret && bus != cpu)		/* Translated DMA range */
-				acpigen_emit_namestring(ctx, "\\_SB.GDV1.DMTR");
-			else if (!ret && bus == cpu)	/* Non translated DMA */
+			if (is_rpi5()) {
+				/* BCM2712 SDHCI is on the SoC bus with 1:1 DMA mapping */
 				acpigen_emit_namestring(ctx, "\\_SB.GDV1.DMNT");
-			else	/* Silicon revisions older than C0: Translated DMA range */
-				acpigen_emit_namestring(ctx, "\\_SB.GDV1.DMTR");
+			} else {
+				phys_addr_t cpu;
+				dma_addr_t bus;
+				u64 size;
+
+				ret = fdt_get_dma_range(gd->fdt_blob, node, &cpu, &bus, &size);
+
+				if (!ret && bus != cpu)		/* Translated DMA range */
+					acpigen_emit_namestring(ctx, "\\_SB.GDV1.DMTR");
+				else if (!ret && bus == cpu)	/* Non translated DMA */
+					acpigen_emit_namestring(ctx, "\\_SB.GDV1.DMNT");
+				else	/* Silicon revisions older than C0: Translated DMA */
+					acpigen_emit_namestring(ctx, "\\_SB.GDV1.DMTR");
+			}
 			acpigen_pop_len(ctx);
 		}
 	}

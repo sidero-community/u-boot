@@ -13,3 +13,13 @@ config PINCTRL_BCM6838
 	help
 	   Support pin multiplexing and pin configuration control on
 	   Broadcom's 6838 family of SoCs.
+
+config PINCTRL_BCM2712
+	depends on ARCH_BCM283X && PINCTRL_FULL && OF_CONTROL
+	default y if BCM2712
+	bool "Broadcom BCM2712 pin control driver"
+	help
+	   Support pin multiplexing and pin configuration control on
+	   Broadcom's BCM2712 SoC (Raspberry Pi 5).
+	   This driver provides pinctrl functionality for configuring
+	   GPIO pin functions and pull-up/down resistors.

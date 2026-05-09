@@ -7,6 +7,7 @@
  */
 
 #include <config.h>
+#include <command.h>
 #include <cpu_func.h>
 #include <asm/io.h>
 #include <asm/arch/base.h>
@@ -52,6 +53,38 @@ void reset_cpu(void)
 
 	__reset_cpu(regs, 0);
 }
+
+#ifdef CONFIG_CMD_POWEROFF
+/*
+ * Signal the VPU firmware to halt rather than reboot by setting partition 63
+ * (value 0x555) in the RSTS register before triggering the watchdog.
+ *
+ * The firmware reads PM_RSTS on startup: partition 63 means "halt". With
+ * POWER_OFF_ON_HALT=1 in the EEPROM bootloader configuration the PMIC is
+ * commanded to cut power; without it the firmware waits for a power-button
+ * press.
+ */
+int do_poweroff(
+			struct cmd_tbl *cmdtp,
+			int flag,
+			int argc, char *const argv[])
+{
+	struct bcm2835_wdog_regs *regs =
+					(struct bcm2835_wdog_regs *)BCM2835_WDOG_PHYSADDR;
+	u32 val;
+
+	val = readl(&regs->rsts);
+	val |= BCM2835_WDOG_PASSWORD;
+	val |= BCM2835_WDOG_RSTS_RASPBERRYPI_HALT;
+	writel(val, &regs->rsts);
+
+	__reset_cpu(regs, 0);
+
+	while (1) { }
+
+	return CMD_RET_SUCCESS;
+}
+#endif
 
 #ifdef CONFIG_EFI_LOADER
 
