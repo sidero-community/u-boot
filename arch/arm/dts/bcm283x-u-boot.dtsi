@@ -27,3 +27,24 @@
 &uart1_gpio14 {
 	bootph-all;
 };
+
+/ {
+	smbios {
+		compatible = "u-boot,sysinfo-smbios";
+
+		smbios {
+			system {
+				manufacturer = "Raspberry Pi";
+				family = "Raspberry Pi";
+			};
+
+			baseboard {
+				manufacturer = "Raspberry Pi";
+			};
+
+			chassis {
+				manufacturer = "Raspberry Pi";
+			};
+		};
+	};
+};
