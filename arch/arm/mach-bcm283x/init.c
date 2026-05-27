@@ -18,7 +18,7 @@
 #ifdef CONFIG_ARM64
 #include <asm/armv8/mmu.h>
 
-#define MEM_MAP_MAX_ENTRIES (4)
+#define MEM_MAP_MAX_ENTRIES (7)
 
 static struct mm_region bcm283x_mem_map[MEM_MAP_MAX_ENTRIES] = {
 	{
@@ -69,25 +69,37 @@ static struct mm_region bcm2711_mem_map[MEM_MAP_MAX_ENTRIES] = {
 
 static struct mm_region bcm2712_mem_map[MEM_MAP_MAX_ENTRIES] = {
 	{
-		/* First 1GB of DRAM */
-		.virt = 0x00000000UL,
-		.phys = 0x00000000UL,
-		.size = 0x40000000UL,
+		/* DRAM aperture - up to 64 GiB at 0x0 per bcm2712.dtsi
+		 * axi/ranges entry <0x00 0x00000000 ... 0x10 0x00000000>.
+		 * RPi 5 SKUs ship with 4/8/16 GiB; map the full aperture so
+		 * U-Boot can reach all banks regardless of SoC variant.
+		 */
+		.virt = 0x0000000000UL,
+		.phys = 0x0000000000UL,
+		.size = 0x1000000000UL,
 		.attrs = PTE_BLOCK_MEMTYPE(MT_NORMAL) |
 			 PTE_BLOCK_INNER_SHARE
 	}, {
-		/* Beginning of AXI bus where uSD controller lives */
+		/* bcm2712.dtsi axi/ranges entry:
+		 * <0x10 0x00000000 ... 0x01 0x00000000>
+		 * Covers 0x10_0000_0000 .. 0x10_ffff_ffff (4 GiB), including
+		 * /soc peripherals and PCIe controller/MMIO registers.
+		 */
 		.virt = 0x1000000000UL,
 		.phys = 0x1000000000UL,
-		.size = 0x0002000000UL,
+		.size = 0x0100000000UL,
 		.attrs = PTE_BLOCK_MEMTYPE(MT_DEVICE_NGNRNE) |
 			 PTE_BLOCK_NON_SHARE |
 			 PTE_BLOCK_PXN | PTE_BLOCK_UXN
 	}, {
-		/* SoC bus */
-		.virt = 0x107c000000UL,
-		.phys = 0x107c000000UL,
-		.size = 0x0004000000UL,
+		/* bcm2712.dtsi axi/ranges entries:
+		 * <0x14 ... 0x04 ...>, <0x18 ... 0x04 ...>, <0x1c ... 0x04 ...>
+		 * Combined 0x14_0000_0000 .. 0x1f_ffff_ffff (48 GiB) for
+		 * PCIe outbound windows used by NVMe / xHCI / RP1 BAR accesses.
+		 */
+		.virt = 0x1400000000UL,
+		.phys = 0x1400000000UL,
+		.size = 0x0c00000000UL,
 		.attrs = PTE_BLOCK_MEMTYPE(MT_DEVICE_NGNRNE) |
 			 PTE_BLOCK_NON_SHARE |
 			 PTE_BLOCK_PXN | PTE_BLOCK_UXN

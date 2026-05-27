@@ -1,0 +1,140 @@
+/*
+ * PCIe DMA Override
+ *
+ * U-Boot's dm_pci_bus_to_phys() cannot parse the upstream dma-ranges which
+ * mix 0x02000000 / 0x03000000 (non-prefetchable) type flags with multiple
+ * entries.  Replace with a single 64-bit prefetchable (0x43000000) entry.
+ *
+ * Upstream maps PCIe address 0x10_0000_0000 → CPU physical 0x0 for 64 GiB
+ * on all three controllers.  We keep that same translation but unify the
+ * type flag to 0x43000000 and drop the secondary MIP / BAR entries that
+ * U-Boot does not need.
+ *
+ * pcie1: upstream has 0x03000000 (non-pref) + MIP1 → single 0x43000000
+ * pcie2: upstream has 0x02000000 + 0x43000000 + MIP0 → single 0x43000000
+ */
+&pcie1 {
+	dma-ranges = <0x43000000 0x10 0x00000000  0x0 0x00000000  0x10 0x00000000>;
+};
+
+/*
+ * RP1 Southbridge — PCIe2 overrides
+ *
+ * The RP1 south bridge (rp1_nexus, compatible "pci1de4,1") sits directly
+ * under pcie2 in the upstream DTS (included via rp1-nexus.dtsi).  Inside
+ * rp1_nexus, a simple-bus node (pci_ep_bus) hosts the RP1 peripheral
+ * devices: Ethernet (rp1_eth), USB (rp1_usb0/1), clocks, and GPIO.
+ *
+ * DMA path: RP1 peripheral → pci_ep_bus dma-ranges (bus 0x10_0000_0000
+ * → PCIe 0x10_0000_0000) → rp1_nexus (passthrough, no dma-ranges) →
+ * pcie2 dma-ranges (PCIe 0x10_0000_0000 → CPU 0x0).
+ *
+ * bootph-all on rp1_nexus ensures U-Boot's driver model includes it in
+ * the pre-relocation device tree scan.  The rp1 MFD driver then calls
+ * dm_scan_fdt_dev() in rp1_bind() to discover pci_ep_bus and its children.
+ */
+&pcie2 {
+	dma-ranges = <0x43000000 0x10 0x00000000  0x0 0x00000000  0x10 0x00000000>;
+
+	rp1_nexus {
+		bootph-all;
+	};
+};
+
+/*
+ * RP1 simple-bus and peripheral boot phase markers.
+ *
+ * pci_ep_bus (simple-bus in rp1-common.dtsi) must be marked bootph-all so
+ * U-Boot scans its children (rp1_eth, rp1_usb0/1, rp1_clocks, rp1_gpio).
+ * rp1_clocks must be available before rp1_eth probes (macb driver requests
+ * RP1_CLK_ETH / RP1_CLK_ETH_TSU via the clock framework).
+ *
+ * status = "okay" is already set for all three peripherals in the upstream
+ * bcm2712-rpi-5-b.dts; only the bootph annotation is added here.
+ */
+&pci_ep_bus {
+	bootph-all;
+};
+
+&rp1_clocks {
+	bootph-all;
+};
+
+&rp1_eth {
+	bootph-all;
+};
+
+&rp1_usb0 {
+	bootph-all;
+};
+
+&rp1_usb1 {
+	bootph-all;
+};
+
+/*
+ * Bootloader config (blconfig) NVMEM node.
+ *
+ * The VPU firmware copies the board's bootloader configuration block into
+ * DRAM and patches this node's reg property with the placement at runtime.
+ * U-Boot's rpi board code reads it via the nvmem API to detect things like
+ * POWER_OFF_ON_HALT for the power-button service. The "raspberrypi,bootloader-
+ * config" / "nvmem-rmem" compatible matches the same handling used on RPi 4
+ * (see bcm2711-rpi.dtsi).
+ *
+ * status starts as "disabled" and is flipped to "okay" by the firmware after
+ * it writes the real reg values; an alias makes it discoverable by label.
+ */
+&rmem {
+	blconfig: nvram@0 {
+		compatible = "raspberrypi,bootloader-config", "nvmem-rmem";
+		#address-cells = <1>;
+		#size-cells = <1>;
+		reg = <0x0 0x0 0x0>;
+		no-map;
+		status = "disabled";
+		bootph-all;
+	};
+};
+
+/ {
+	aliases {
+		ethernet0 = &rp1_eth;
+		blconfig = &blconfig;
+	};
+
+	smbios {
+		compatible = "u-boot,sysinfo-smbios";
+
+		smbios {
+			/*
+			 * Type 1 — System Information
+			 * serial is intentionally empty; overridden at runtime by the
+			 * serial# U-Boot environment variable, which must contain the
+			 * full Talos NoCloud datasource string:
+			 *   ds=nocloud-net;s=http://<server>/configs/;h=<hostname>
+			 * Set via: fw_setenv -c /boot/fw_env.config serial# "ds=nocloud-net;..."
+			 */
+			system {
+				manufacturer = "Raspberry Pi";
+				product = "5 Model B";
+				version = "";
+				serial = "";
+				sku = "";
+				family = "Raspberry Pi";
+			};
+
+			/* Type 2 — Baseboard Information */
+			baseboard {
+				manufacturer = "Raspberry Pi";
+				product = "5 Model B";
+				asset-tag = "";
+			};
+
+			/* Type 3 — Chassis Information */
+			chassis {
+				manufacturer = "Raspberry Pi";
+			};
+		};
+	};
+};

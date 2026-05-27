@@ -113,7 +113,7 @@ int nvme_print_info(struct udevice *udev)
 	if (!ctrl)
 		return -ENOMEM;
 
-	if (nvme_identify(dev, 0, 1, (dma_addr_t)(long)ctrl)) {
+	if (nvme_identify(dev, 0, 1, ctrl)) {
 		ret = -EIO;
 		goto free_ctrl;
 	}
@@ -128,7 +128,7 @@ int nvme_print_info(struct udevice *udev)
 		goto free_ctrl;
 	}
 
-	if (nvme_identify(dev, ns->ns_id, 0, (dma_addr_t)(long)id)) {
+	if (nvme_identify(dev, ns->ns_id, 0, id)) {
 		ret = -EIO;
 		goto free_id;
 	}
